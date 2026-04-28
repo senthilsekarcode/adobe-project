@@ -1,1 +1,39 @@
-# adobe-project
+# Adobe Data Engineer Assessment
+
+Version 1 batch pipeline for search attribution reporting.
+
+## Run
+
+```powershell
+python main.py
+```
+
+The CLI reads `data.txt` by default and writes these generated reports to `outputs/`:
+
+- `search_engine_summary.csv`
+- `search_keyword_summary.csv`
+- `top_keywords.csv`
+- `run_summary.json`
+
+Optional arguments:
+
+```powershell
+python main.py --input data.txt --output-dir outputs
+```
+
+## Test
+
+```powershell
+py -m unittest discover -s tests
+```
+
+## Assumptions
+
+- Input is a tab-separated file with the header columns present in `data.txt`.
+- Sessions are keyed by `ip` and `user_agent`; a new session starts after more than 30 minutes of inactivity.
+- Attribution uses the first supported external search referrer in a session.
+- Supported search engines and keyword parameters are Google `q`, Bing `q`, and Yahoo `p`.
+- Keywords are lowercased so equivalent terms with different casing roll up together.
+- Purchases are hits where `event_list` contains event token `1`.
+- Revenue sums the fourth semicolon-delimited field from each comma-delimited product in `product_list`.
+- Generated outputs and Python cache files are intentionally ignored by git.
