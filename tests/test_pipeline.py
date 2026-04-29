@@ -2,10 +2,12 @@ import csv
 import json
 import shutil
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from src.pipeline import (
     Hit,
+    SearchTouch,
     build_sessions,
     extract_search_touch,
     is_purchase,
@@ -18,18 +20,25 @@ class PipelineTest(unittest.TestCase):
     def test_extract_search_touch_for_supported_engines(self):
         self.assertEqual(
             extract_search_touch("http://www.google.com/search?q=Ipod&client=firefox"),
-            ("google", "ipod"),
+            _touch("google.com", "google", "ipod"),
         )
         self.assertEqual(
             extract_search_touch("http://www.bing.com/search?q=Zune&form=QBLH"),
-            ("bing", "zune"),
+            _touch("bing.com", "bing", "zune"),
         )
         self.assertEqual(
             extract_search_touch("http://search.yahoo.com/search?p=cd+player&ei=UTF-8"),
-            ("yahoo", "cd player"),
+            _touch("search.yahoo.com", "yahoo", "cd player"),
         )
         self.assertIsNone(extract_search_touch("http://notgoogle.com/search?q=Ipod"))
         self.assertIsNone(extract_search_touch("http://www.esshopzilla.com/search/?k=Ipod"))
+
+    def test_extract_search_touch_tracks_domain_from_referrer(self):
+        touch = extract_search_touch("https://search.yahoo.com/search?p=Headphones")
+
+        self.assertIsNotNone(touch)
+        self.assertEqual(touch.domain, "search.yahoo.com")
+        self.assertEqual(touch.keyword, "headphones")
 
     def test_purchase_and_revenue_parsing(self):
         self.assertTrue(is_purchase("2,1"))
@@ -46,8 +55,8 @@ class PipelineTest(unittest.TestCase):
         sessions = build_sessions(hits)
 
         self.assertEqual(len(sessions), 2)
-        self.assertEqual(sessions[0].attribution, ("google", "first"))
-        self.assertEqual(sessions[1].attribution, ("yahoo", "third"))
+        self.assertEqual(sessions[0].attribution, _touch("google.com", "google", "first"))
+        self.assertEqual(sessions[1].attribution, _touch("search.yahoo.com", "yahoo", "third"))
 
     def test_run_pipeline_writes_expected_outputs(self):
         temp_path = Path(__file__).resolve().parent / ".tmp" / "pipeline"
@@ -64,6 +73,7 @@ class PipelineTest(unittest.TestCase):
         engine_rows = _read_csv(output_dir / "search_engine_summary.csv")
         keyword_rows = _read_csv(output_dir / "search_keyword_summary.csv")
         top_rows = _read_csv(output_dir / "top_keywords.csv")
+        deliverable_file = output_dir / f"{datetime.now(timezone.utc):%Y-%m-%d}_SearchKeywordPerformance.tab"
         run_summary = json.loads((output_dir / "run_summary.json").read_text(encoding="utf-8"))
 
         self.assertEqual(
@@ -93,6 +103,18 @@ class PipelineTest(unittest.TestCase):
             ],
         )
         self.assertEqual(top_rows[0]["keyword"], "ipod")
+        self.assertTrue(deliverable_file.exists())
+        self.assertEqual(
+            deliverable_file.read_text(encoding="utf-8").splitlines()[0],
+            "Search Engine Domain\tSearch Keyword\tRevenue",
+        )
+        self.assertEqual(
+            _read_tab(deliverable_file),
+            [
+                {"Search Engine Domain": "google.com", "Search Keyword": "ipod", "Revenue": "290.00"},
+                {"Search Engine Domain": "bing.com", "Search Keyword": "zune", "Revenue": "250.00"},
+            ],
+        )
         self.assertEqual(run_summary, {"sessions": 2, "attributed_sessions": 2, "purchases": 2, "revenue": "540.00"})
 
 
@@ -106,6 +128,10 @@ def _hit(time, ip, user_agent, event_list, referrer, product_list=""):
         product_list=product_list,
         referrer=referrer,
     )
+
+
+def _touch(domain, engine, keyword):
+    return SearchTouch(domain=domain, engine=engine, keyword=keyword)
 
 
 def _write_sample_input(path):
@@ -176,6 +202,11 @@ def _write_sample_input(path):
 def _read_csv(path):
     with path.open(newline="", encoding="utf-8") as file:
         return list(csv.DictReader(file))
+
+
+def _read_tab(path):
+    with path.open(newline="", encoding="utf-8") as file:
+        return list(csv.DictReader(file, delimiter="\t"))
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import csv
 import json
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Iterable
@@ -32,13 +33,20 @@ class Hit:
     referrer: str
 
 
+@dataclass(frozen=True)
+class SearchTouch:
+    domain: str
+    engine: str
+    keyword: str
+
+
 @dataclass
 class Session:
     session_id: int
     ip: str
     user_agent: str
     hits: list[Hit]
-    attribution: tuple[str, str] | None = None
+    attribution: SearchTouch | None = None
 
 
 def read_hits(input_path: str | Path) -> list[Hit]:
@@ -60,13 +68,13 @@ def parse_hit(row: dict[str, str]) -> Hit:
     )
 
 
-def extract_search_touch(referrer: str) -> tuple[str, str] | None:
-    """Return (search_engine, keyword) for supported external search referrers."""
+def extract_search_touch(referrer: str) -> SearchTouch | None:
+    """Return search attribution details for supported external search referrers."""
     if not referrer:
         return None
 
     parsed = urlparse(referrer)
-    host = parsed.netloc.lower()
+    host = (parsed.hostname or "").lower()
     for engine, query_param in SEARCH_ENGINES.items():
         if not _is_search_host(host, engine):
             continue
@@ -79,13 +87,19 @@ def extract_search_touch(referrer: str) -> tuple[str, str] | None:
         if not keyword:
             return None
 
-        return engine, keyword
+        return SearchTouch(domain=_normalize_search_domain(host), engine=engine, keyword=keyword)
 
     return None
 
 
 def _is_search_host(host: str, engine: str) -> bool:
     return engine in host.split(".")
+
+
+def _normalize_search_domain(host: str) -> str:
+    if host.startswith("www."):
+        return host[4:]
+    return host
 
 
 def is_purchase(event_list: str) -> bool:
@@ -148,6 +162,7 @@ def build_sessions(hits: Iterable[Hit]) -> list[Session]:
 def summarize_sessions(sessions: Iterable[Session]) -> dict[str, object]:
     engine_summary = defaultdict(_empty_metric)
     keyword_summary = defaultdict(_empty_metric)
+    deliverable_summary = defaultdict(Decimal)
     top_keywords = defaultdict(_empty_metric)
 
     session_count = 0
@@ -168,14 +183,16 @@ def summarize_sessions(sessions: Iterable[Session]) -> dict[str, object]:
             continue
 
         attributed_sessions += 1
-        engine, keyword = session.attribution
-        _add_metrics(engine_summary[engine], 1, session_purchases, session_revenue)
-        _add_metrics(keyword_summary[(engine, keyword)], 1, session_purchases, session_revenue)
-        _add_metrics(top_keywords[keyword], 1, session_purchases, session_revenue)
+        touch = session.attribution
+        _add_metrics(engine_summary[touch.engine], 1, session_purchases, session_revenue)
+        _add_metrics(keyword_summary[(touch.engine, touch.keyword)], 1, session_purchases, session_revenue)
+        deliverable_summary[(touch.domain, touch.keyword)] += session_revenue
+        _add_metrics(top_keywords[touch.keyword], 1, session_purchases, session_revenue)
 
     return {
         "engine_summary": engine_summary,
         "keyword_summary": keyword_summary,
+        "deliverable_summary": deliverable_summary,
         "top_keywords": top_keywords,
         "run_summary": {
             "sessions": session_count,
@@ -200,6 +217,7 @@ def write_outputs(summaries: dict[str, object], output_dir: str | Path) -> None:
 
     _write_engine_summary(summaries["engine_summary"], output_path / "search_engine_summary.csv")
     _write_keyword_summary(summaries["keyword_summary"], output_path / "search_keyword_summary.csv")
+    _write_search_keyword_performance(summaries["deliverable_summary"], output_path / _deliverable_filename())
     _write_top_keywords(summaries["top_keywords"], output_path / "top_keywords.csv")
 
     with (output_path / "run_summary.json").open("w", encoding="utf-8") as summary_file:
@@ -244,6 +262,26 @@ def _write_keyword_summary(summary: dict[tuple[str, str], dict[str, object]], ou
     _write_csv(output_file, ["search_engine", "keyword", "visits", "purchases", "revenue"], rows)
 
 
+def _write_search_keyword_performance(summary: dict[tuple[str, str], Decimal], output_file: Path) -> None:
+    rows = [
+        {
+            "Search Engine Domain": domain,
+            "Search Keyword": keyword,
+            "Revenue": _format_decimal(revenue),
+        }
+        for (domain, keyword), revenue in sorted(
+            summary.items(),
+            key=lambda item: (-item[1], item[0][0], item[0][1]),
+        )
+    ]
+    _write_delimited(
+        output_file,
+        ["Search Engine Domain", "Search Keyword", "Revenue"],
+        rows,
+        delimiter="\t",
+    )
+
+
 def _write_top_keywords(summary: dict[str, dict[str, object]], output_file: Path) -> None:
     rows = [
         {
@@ -261,10 +299,23 @@ def _write_top_keywords(summary: dict[str, dict[str, object]], output_file: Path
 
 
 def _write_csv(output_file: Path, fieldnames: list[str], rows: list[dict[str, object]]) -> None:
+    _write_delimited(output_file, fieldnames, rows, delimiter=",")
+
+
+def _write_delimited(
+    output_file: Path,
+    fieldnames: list[str],
+    rows: list[dict[str, object]],
+    delimiter: str,
+) -> None:
     with output_file.open("w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames, delimiter=delimiter)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _deliverable_filename() -> str:
+    return f"{datetime.now(timezone.utc):%Y-%m-%d}_SearchKeywordPerformance.tab"
 
 
 def _format_decimal(value: Decimal) -> str:
